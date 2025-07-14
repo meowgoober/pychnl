@@ -1,0 +1,38 @@
+# Read the Docs configuration file
+# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
+
+# Required
+version: 2
+
+# Set the OS, Python version, and other tools you might need
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.13"
+  jobs:
+    post_create_environment:
+      # Install chrome dependencies for selenium (if needed for testing)
+      - apt-get update
+      - apt-get install -y wget gnupg
+    post_install:
+      # Install your package in development mode
+      - pip install -e .
+
+# Build documentation with MkDocs
+mkdocs:
+  configuration: mkdocs.yml
+
+# Optionally declare the Python requirements required to build your documentation
+# This is recommended for reproducible builds
+python:
+  install:
+    - requirements: docs/requirements.txt
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs
+
+# Formats to build (optional)
+formats:
+  - pdf
+  - htmlzip
