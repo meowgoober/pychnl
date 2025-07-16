@@ -124,12 +124,16 @@ class StreamURL:
                 if video_poster:
                     stream_info['poster'] = video_poster
             
-            # Find all source elements
+            # Find all source elements - this is the key part that needs fixing
             source_elements = video_element.find_elements(By.TAG_NAME, "source")
             
-            for source in source_elements:
+            print(f"Found {len(source_elements)} source elements")
+            
+            for i, source in enumerate(source_elements):
                 src = source.get_attribute("src")
                 source_type = source.get_attribute("type")
+                
+                print(f"Source {i+1}: src='{src}', type='{source_type}'")
                 
                 if src:
                     source_info = {
@@ -139,22 +143,58 @@ class StreamURL:
                     
                     stream_info['sources'].append(source_info)
                     
-                    # Categorize by type
-                    if source_type:
-                        if "m3u8" in source_type or "mpegurl" in source_type.lower():
-                            stream_info['urls']['m3u8'] = src
-                        elif "mp4" in source_type:
-                            stream_info['urls']['mp4'] = src
-                        elif "webm" in source_type:
-                            stream_info['urls']['webm'] = src
+                    # Improved M3U8 detection
+                    is_m3u8 = False
                     
-                    # Also categorize by file extension if type is not clear
+                    # Check by MIME type
+                    if source_type:
+                        if ("application/x-mpegurl" in source_type.lower() or 
+                            "application/vnd.apple.mpegurl" in source_type.lower() or
+                            "m3u8" in source_type.lower()):
+                            is_m3u8 = True
+                    
+                    # Check by file extension
                     if src.endswith('.m3u8'):
+                        is_m3u8 = True
+                    
+                    # Check by URL pattern (delta.webchnl.live with .m3u8)
+                    if 'delta.webchnl.live' in src and '.m3u8' in src:
+                        is_m3u8 = True
+                    
+                    if is_m3u8:
                         stream_info['urls']['m3u8'] = src
+                        print(f"✅ Found M3U8 URL: {src}")
+                    elif source_type and "mp4" in source_type:
+                        stream_info['urls']['mp4'] = src
+                        print(f"✅ Found MP4 URL: {src}")
+                    elif source_type and "webm" in source_type:
+                        stream_info['urls']['webm'] = src
+                        print(f"✅ Found WebM URL: {src}")
                     elif src.endswith('.mp4'):
                         stream_info['urls']['mp4'] = src
+                        print(f"✅ Found MP4 URL (by extension): {src}")
                     elif src.endswith('.webm'):
                         stream_info['urls']['webm'] = src
+                        print(f"✅ Found WebM URL (by extension): {src}")
+            
+            # Additional fallback: Try to extract M3U8 URL from page source if not found
+            if 'm3u8' not in stream_info['urls']:
+                print("M3U8 not found in source elements, trying page source extraction...")
+                m3u8_url = self._extract_m3u8_from_page()
+                if m3u8_url:
+                    stream_info['urls']['m3u8'] = m3u8_url
+                    print(f"✅ Found M3U8 URL from page source: {m3u8_url}")
+            
+            # Try another approach: look for source elements more broadly
+            if 'm3u8' not in stream_info['urls']:
+                print("Trying broader source element search...")
+                all_sources = self.driver.find_elements(By.CSS_SELECTOR, "source")
+                for source in all_sources:
+                    src = source.get_attribute("src")
+                    if src and ('.m3u8' in src or 'delta.webchnl.live' in src):
+                        stream_info['urls']['m3u8'] = src
+                        print(f"✅ Found M3U8 URL from broader search: {src}")
+                        break
             
             # Extract additional metadata from video element
             video_attrs = ['preload', 'autoplay', 'controls', 'loop', 'muted']
@@ -162,12 +202,6 @@ class StreamURL:
                 value = video_element.get_attribute(attr)
                 if value is not None:
                     stream_info['metadata'][attr] = value
-            
-            # Try to extract M3U8 URL from page source or JavaScript if not found in sources
-            if 'm3u8' not in stream_info['urls']:
-                m3u8_url = self._extract_m3u8_from_page()
-                if m3u8_url:
-                    stream_info['urls']['m3u8'] = m3u8_url
             
             # Get video dimensions if available
             try:
@@ -208,13 +242,23 @@ class StreamURL:
             # Get page source
             page_source = self.driver.page_source
             
-            # Look for M3U8 URLs in the page source
-            m3u8_pattern = r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*'
-            m3u8_matches = re.findall(m3u8_pattern, page_source)
+            # Enhanced M3U8 pattern matching
+            patterns = [
+                r'https://delta\.webchnl\.live/memfs/[^"\'<>\s]+\.m3u8',
+                r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*',
+                r'"(https://delta\.webchnl\.live/[^"]+\.m3u8)"',
+                r"'(https://delta\.webchnl\.live/[^']+\.m3u8)'"
+            ]
             
-            if m3u8_matches:
-                # Return the first M3U8 URL found
-                return m3u8_matches[0]
+            for pattern in patterns:
+                matches = re.findall(pattern, page_source)
+                if matches:
+                    # Return the first match
+                    url = matches[0]
+                    if isinstance(url, tuple):
+                        url = url[0]
+                    print(f"Found M3U8 URL with pattern '{pattern}': {url}")
+                    return url
             
             # Also try to execute JavaScript to find M3U8 URLs
             try:
@@ -222,14 +266,27 @@ class StreamURL:
                     var sources = document.querySelectorAll('source');
                     for (var i = 0; i < sources.length; i++) {
                         var src = sources[i].getAttribute('src');
-                        if (src && src.includes('.m3u8')) {
+                        if (src && (src.includes('.m3u8') || src.includes('delta.webchnl.live'))) {
+                            console.log('Found source:', src);
                             return src;
                         }
                     }
+                    
+                    // Also check for any elements with src containing m3u8
+                    var allElements = document.querySelectorAll('[src*="m3u8"]');
+                    for (var j = 0; j < allElements.length; j++) {
+                        var src = allElements[j].getAttribute('src');
+                        if (src) {
+                            console.log('Found m3u8 element:', src);
+                            return src;
+                        }
+                    }
+                    
                     return null;
                 """)
                 
                 if js_result:
+                    print(f"Found M3U8 URL via JavaScript: {js_result}")
                     return js_result
                     
             except Exception as e:
