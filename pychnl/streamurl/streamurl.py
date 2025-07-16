@@ -7,7 +7,8 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
-from typing import Optional, Dict
+from typing import Optional, Dict, List
+import re
 
 
 class StreamURL:
@@ -80,66 +81,175 @@ class StreamURL:
             print(f"Timeout waiting for channel items to load")
             return None
     
-    def _extract_stream_url(self) -> Optional[Dict[str, str]]:
+    def _extract_stream_urls(self) -> Optional[Dict[str, any]]:
         """
-        Extract stream URL from the video element
+        Extract all stream URLs and information from the video player
         
         Returns:
-            Optional[Dict[str, str]]: Dictionary containing stream URLs if found
+            Optional[Dict[str, any]]: Dictionary containing all stream information
         """
         try:
-            # Wait for video element to load
+            # Wait for video container to load
             WebDriverWait(self.driver, self.timeout).until(
-                EC.presence_of_element_located((By.TAG_NAME, "video"))
+                EC.presence_of_element_located((By.CLASS_NAME, "video-js"))
             )
             
-            # Find the video element
+            stream_info = {
+                'urls': {},
+                'poster': None,
+                'blob_url': None,
+                'sources': [],
+                'metadata': {}
+            }
+            
+            # Find the video container
+            video_container = self.driver.find_element(By.CLASS_NAME, "video-js")
+            
+            # Extract poster URL from container
+            poster_url = video_container.get_attribute("poster")
+            if poster_url:
+                stream_info['poster'] = poster_url
+            
+            # Find the actual video element
             video_element = self.driver.find_element(By.TAG_NAME, "video")
             
-            # Extract different types of URLs
-            stream_info = {}
+            # Get the blob URL from video src
+            blob_src = video_element.get_attribute("src")
+            if blob_src:
+                stream_info['blob_url'] = blob_src
             
-            # Get the main src attribute (blob URL)
-            main_src = video_element.get_attribute("src")
-            if main_src:
-                stream_info["blob_url"] = main_src
+            # Extract poster from video element as well (fallback)
+            if not stream_info['poster']:
+                video_poster = video_element.get_attribute("poster")
+                if video_poster:
+                    stream_info['poster'] = video_poster
             
-            # Get source elements for direct stream URLs
+            # Find all source elements
             source_elements = video_element.find_elements(By.TAG_NAME, "source")
             
             for source in source_elements:
                 src = source.get_attribute("src")
                 source_type = source.get_attribute("type")
                 
-                if src and source_type:
-                    if "m3u8" in source_type:
-                        stream_info["m3u8_url"] = src
-                    elif "mp4" in source_type:
-                        stream_info["mp4_url"] = src
+                if src:
+                    source_info = {
+                        'url': src,
+                        'type': source_type
+                    }
+                    
+                    stream_info['sources'].append(source_info)
+                    
+                    # Categorize by type
+                    if source_type:
+                        if "m3u8" in source_type or "mpegurl" in source_type.lower():
+                            stream_info['urls']['m3u8'] = src
+                        elif "mp4" in source_type:
+                            stream_info['urls']['mp4'] = src
+                        elif "webm" in source_type:
+                            stream_info['urls']['webm'] = src
+                    
+                    # Also categorize by file extension if type is not clear
+                    if src.endswith('.m3u8'):
+                        stream_info['urls']['m3u8'] = src
+                    elif src.endswith('.mp4'):
+                        stream_info['urls']['mp4'] = src
+                    elif src.endswith('.webm'):
+                        stream_info['urls']['webm'] = src
             
-            # Get poster image if available
-            poster = video_element.get_attribute("poster")
-            if poster:
-                stream_info["poster_url"] = poster
+            # Extract additional metadata from video element
+            video_attrs = ['preload', 'autoplay', 'controls', 'loop', 'muted']
+            for attr in video_attrs:
+                value = video_element.get_attribute(attr)
+                if value is not None:
+                    stream_info['metadata'][attr] = value
+            
+            # Try to extract M3U8 URL from page source or JavaScript if not found in sources
+            if 'm3u8' not in stream_info['urls']:
+                m3u8_url = self._extract_m3u8_from_page()
+                if m3u8_url:
+                    stream_info['urls']['m3u8'] = m3u8_url
+            
+            # Get video dimensions if available
+            try:
+                video_width = video_element.get_attribute("videoWidth")
+                video_height = video_element.get_attribute("videoHeight")
+                if video_width and video_height:
+                    stream_info['metadata']['dimensions'] = {
+                        'width': video_width,
+                        'height': video_height
+                    }
+            except:
+                pass
+            
+            # Check if we found any useful URLs
+            if stream_info['urls'] or stream_info['blob_url'] or stream_info['sources']:
+                return stream_info
+            else:
+                return None
                 
-            return stream_info if stream_info else None
-            
         except TimeoutException:
-            print("Timeout waiting for video element to load")
+            print("Timeout waiting for video player to load")
             return None
         except NoSuchElementException:
-            print("Video element not found")
+            print("Video player element not found")
+            return None
+        except Exception as e:
+            print(f"Error extracting stream URLs: {e}")
             return None
     
-    def get_stream_url(self, channel_name: str) -> Optional[Dict[str, str]]:
+    def _extract_m3u8_from_page(self) -> Optional[str]:
         """
-        Get stream URL for a specific channel
+        Try to extract M3U8 URL from page source or JavaScript
+        
+        Returns:
+            Optional[str]: M3U8 URL if found
+        """
+        try:
+            # Get page source
+            page_source = self.driver.page_source
+            
+            # Look for M3U8 URLs in the page source
+            m3u8_pattern = r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*'
+            m3u8_matches = re.findall(m3u8_pattern, page_source)
+            
+            if m3u8_matches:
+                # Return the first M3U8 URL found
+                return m3u8_matches[0]
+            
+            # Also try to execute JavaScript to find M3U8 URLs
+            try:
+                js_result = self.driver.execute_script("""
+                    var sources = document.querySelectorAll('source');
+                    for (var i = 0; i < sources.length; i++) {
+                        var src = sources[i].getAttribute('src');
+                        if (src && src.includes('.m3u8')) {
+                            return src;
+                        }
+                    }
+                    return null;
+                """)
+                
+                if js_result:
+                    return js_result
+                    
+            except Exception as e:
+                print(f"JavaScript execution failed: {e}")
+                
+            return None
+            
+        except Exception as e:
+            print(f"Error extracting M3U8 from page: {e}")
+            return None
+    
+    def get_stream_info(self, channel_name: str) -> Optional[Dict[str, any]]:
+        """
+        Get comprehensive stream information for a specific channel
         
         Args:
-            channel_name (str): Name of the channel to get stream URL for
+            channel_name (str): Name of the channel to get stream info for
             
         Returns:
-            Optional[Dict[str, str]]: Dictionary containing stream URLs and info
+            Optional[Dict[str, any]]: Dictionary containing all stream information
         """
         try:
             # Setup driver if not already done
@@ -162,29 +272,63 @@ class StreamURL:
             channel_button.click()
             
             # Wait a bit for the page to load
-            time.sleep(2)
+            time.sleep(3)
             
-            # Extract stream URL from video element
-            print("Extracting stream URL...")
-            stream_info = self._extract_stream_url()
+            # Extract all stream information
+            print("Extracting stream information...")
+            stream_info = self._extract_stream_urls()
             
             if stream_info:
                 print(f"Successfully extracted stream info for '{channel_name}'")
+                
+                # Add channel name to the info
+                stream_info['channel_name'] = channel_name
+                stream_info['extraction_time'] = time.time()
+                
                 return stream_info
             else:
                 print(f"Failed to extract stream info for '{channel_name}'")
                 return None
                 
         except Exception as e:
-            print(f"Error getting stream URL: {e}")
+            print(f"Error getting stream info: {e}")
             return None
     
-    def get_available_channels(self) -> list:
+    def get_stream_url(self, channel_name: str) -> Optional[Dict[str, str]]:
+        """
+        Get stream URL for a specific channel (legacy method for backward compatibility)
+        
+        Args:
+            channel_name (str): Name of the channel to get stream URL for
+            
+        Returns:
+            Optional[Dict[str, str]]: Dictionary containing stream URLs
+        """
+        stream_info = self.get_stream_info(channel_name)
+        
+        if stream_info:
+            # Return simplified format for backward compatibility
+            result = {}
+            
+            if stream_info.get('urls'):
+                result.update(stream_info['urls'])
+            
+            if stream_info.get('blob_url'):
+                result['blob_url'] = stream_info['blob_url']
+            
+            if stream_info.get('poster'):
+                result['poster_url'] = stream_info['poster']
+            
+            return result if result else None
+        
+        return None
+    
+    def get_available_channels(self) -> List[str]:
         """
         Get list of available channels from the main page
         
         Returns:
-            list: List of channel names
+            List[str]: List of channel names
         """
         try:
             # Setup driver if not already done
@@ -233,7 +377,7 @@ class StreamURL:
 
 # Example usage
 if __name__ == "__main__":
-    # Test the stream URL extraction
+    # Test the comprehensive stream info extraction
     with StreamURL(headless=True) as stream_client:
         # Get available channels
         channels = stream_client.get_available_channels()
@@ -242,11 +386,36 @@ if __name__ == "__main__":
         # Test with a specific channel
         if channels:
             test_channel = channels[0]  # Use first available channel
-            stream_info = stream_client.get_stream_url(test_channel)
+            print(f"\nTesting with channel: {test_channel}")
+            
+            # Get comprehensive stream info
+            stream_info = stream_client.get_stream_info(test_channel)
             
             if stream_info:
-                print(f"\nStream info for '{test_channel}':")
-                for key, value in stream_info.items():
+                print(f"\nComprehensive stream info for '{test_channel}':")
+                print(f"Channel: {stream_info.get('channel_name', 'N/A')}")
+                print(f"Poster: {stream_info.get('poster', 'N/A')}")
+                print(f"Blob URL: {stream_info.get('blob_url', 'N/A')}")
+                
+                print("\nStream URLs:")
+                for url_type, url in stream_info.get('urls', {}).items():
+                    print(f"  {url_type}: {url}")
+                
+                print("\nAll Sources:")
+                for i, source in enumerate(stream_info.get('sources', [])):
+                    print(f"  Source {i+1}: {source['url']} (type: {source['type']})")
+                
+                print("\nMetadata:")
+                for key, value in stream_info.get('metadata', {}).items():
                     print(f"  {key}: {value}")
+                
+                # Test legacy method
+                print("\n--- Legacy method test ---")
+                legacy_result = stream_client.get_stream_url(test_channel)
+                if legacy_result:
+                    print("Legacy format result:")
+                    for key, value in legacy_result.items():
+                        print(f"  {key}: {value}")
+                        
             else:
                 print(f"Failed to get stream info for '{test_channel}'")
