@@ -7,6 +7,14 @@
 
 License: GPL 3.0
 In a nutshell:
+
+
 If you use anything directly from pychnl (excluding using the library), your project must also be open-source.
+
+
 give credit where it's due.
+
+
 and dont do illegal stuff with it (im not sure how but thats in it i guess)
+
+
