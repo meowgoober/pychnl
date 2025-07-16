@@ -5,11 +5,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 from typing import Optional, Dict, List
 import re
-
+import os
 
 class StreamURL:
     """Handle stream URL extraction from webchnl.live"""
@@ -28,25 +28,80 @@ class StreamURL:
         self.base_url = "https://webchnl.live"
         
     def _setup_driver(self):
-        """Set up the Chrome driver with appropriate options"""
+        """
+        Set up the Chrome driver with appropriate options.
+        This method is now idempotent, meaning it will only set up the driver
+        if it's not already running.
+        """
+        if self.driver and self._is_driver_running():
+            print("Driver is already running.")
+            return
+
+        print("Setting up Chrome driver...")
         chrome_options = Options()
         
         if self.headless:
             chrome_options.add_argument("--headless")
-        
-        # Additional options for better performance and compatibility
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
+            # Additional arguments for faster loading and reduced resource usage in headless mode
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--window-size=1920,1080") # Set a consistent window size
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-setuid-sandbox")
+            chrome_options.add_argument("--disable-web-security")
+            chrome_options.add_argument("--allow-running-insecure-content")
+            chrome_options.add_argument("--blink-settings=imagesEnabled=false") # Disable images for speed
+            chrome_options.add_argument("--disable-features=IsolateOrigins,site-per-process")
+            chrome_options.add_argument("--disable-infobars")
+            chrome_options.add_argument("--disable-browser-side-navigation")
+            chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+            chrome_options.add_argument("--disable-software-rasterizer")
+            chrome_options.add_argument("--disable-background-networking")
+            chrome_options.add_argument("--disable-default-apps")
+            chrome_options.add_argument("--disable-sync")
+            chrome_options.add_argument("--disable-translate")
+            chrome_options.add_argument("--hide-scrollbars")
+            chrome_options.add_argument("--metrics-recording-only")
+            chrome_options.add_argument("--mute-audio")
+            chrome_options.add_argument("--no-first-run")
+            chrome_options.add_argument("--disable-notifications")
+            chrome_options.add_argument("--disable-logging")
+            chrome_options.add_argument("--disable-popup-blocking")
+            chrome_options.add_argument("--disable-component-update") # Disable automatic updates
+            chrome_options.add_argument("--enable-automation") # This is fine, it's about internal automation
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled") # Still good for anti-detection
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
         
         # Automatically download and setup ChromeDriver
+        # Suppress webdriver_manager logs for cleaner output
+        os.environ['WDM_LOG_LEVEL'] = '0' 
         service = Service(ChromeDriverManager().install())
         
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
+        # Execute script to hide WebDriver properties for anti-detection
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        print("Chrome driver setup complete.")
+
+    def _is_driver_running(self) -> bool:
+        """
+        Checks if the Selenium WebDriver instance is still active.
         
+        Returns:
+            bool: True if the driver is running, False otherwise.
+        """
+        if not self.driver:
+            return False
+        try:
+            # Attempt to get the current URL to check if the driver is responsive
+            self.driver.current_url
+            return True
+        except WebDriverException:
+            # If a WebDriverException occurs, the driver is likely not active
+            self.driver = None # Reset driver to None as it's no longer valid
+            return False
+            
     def _find_channel_button(self, channel_name: str) -> Optional[object]:
         """
         Find the channel button by name
@@ -309,9 +364,8 @@ class StreamURL:
             Optional[Dict[str, any]]: Dictionary containing all stream information
         """
         try:
-            # Setup driver if not already done
-            if not self.driver:
-                self._setup_driver()
+            # Setup driver if not already done, or if it's not running
+            self._setup_driver()
             
             # Navigate to webchnl.live
             print(f"Navigating to {self.base_url}...")
@@ -388,9 +442,8 @@ class StreamURL:
             List[str]: List of channel names
         """
         try:
-            # Setup driver if not already done
-            if not self.driver:
-                self._setup_driver()
+            # Setup driver if not already done, or if it's not running
+            self._setup_driver()
             
             # Navigate to webchnl.live
             self.driver.get(self.base_url)
@@ -418,10 +471,14 @@ class StreamURL:
             return []
     
     def close(self):
-        """Close the browser driver"""
-        if self.driver:
+        """Close the browser driver if it's running."""
+        if self.driver and self._is_driver_running():
+            print("Closing Chrome driver...")
             self.driver.quit()
             self.driver = None
+            print("Chrome driver closed.")
+        else:
+            print("No active Chrome driver to close.")
     
     def __enter__(self):
         """Context manager entry"""
@@ -476,3 +533,11 @@ if __name__ == "__main__":
                         
             else:
                 print(f"Failed to get stream info for '{test_channel}'")
+        else:
+            print("No channels found to test.")
+
+    # Demonstrate that the driver is not running after exiting the 'with' block
+    print("\nAfter exiting the 'with' block:")
+    temp_client = StreamURL()
+    temp_client._setup_driver() # This will now set up a new driver if none is running
+    temp_client.close() # And this will close it properly
